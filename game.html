@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Neon Star Catcher — built from one prompt</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #070718; }
+  canvas { display: block; touch-action: none; }
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: 10px; text-align: center;
+    color: rgba(255,255,255,.55); font: 14px/1.4 system-ui, sans-serif;
+    pointer-events: none; letter-spacing: .04em;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hint">&#8592; &#8594; move &nbsp;&middot;&nbsp; catch stars, dodge bombs</div>
+<script>
+'use strict';
+// Neon Star Catcher — a tiny browser game built from one prompt:
+// "move a basket with arrow keys, catch falling stars for points,
+//  dodge bombs, 60 seconds on the clock, game over screen with score and restart."
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const params = new URLSearchParams(location.search);
+const AUTOPLAY = params.get('autoplay') === '1';   // demo bot plays itself (for the video)
+const CLOCK_START = Math.max(5, parseInt(params.get('clock') || '60', 10) || 60);
+
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.floor(W * DPR); canvas.height = Math.floor(H * DPR);
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  basket.y = H - 130;
+  basket.x = Math.min(Math.max(basket.x, 70), W - 70);
+}
+window.addEventListener('resize', resize);
+
+const basket = { x: 540, y: 0, w: 170, h: 30, speed: 620 };
+let stars = [];      // falling items: {x, y, vy, r, kind: 'star'|'bomb'|'super', rot, vr}
+let particles = []; // catch bursts
+let bgStars = [];   // twinkling background
+let score = 0, lives = 3, timeLeft = CLOCK_START, elapsed = 0;
+let state = 'playing'; // 'playing' | 'over'
+let spawnT = 0, best = 0;
+try { best = parseInt(localStorage.getItem('neon-star-best') || '0', 10) || 0; } catch (e) {}
+
+for (let i = 0; i < 90; i++) {
+  bgStars.push({ x: Math.random(), y: Math.random(), r: Math.random() * 1.8 + 0.4, p: Math.random() * 6.28, s: 0.5 + Math.random() * 1.5 });
+}
+
+const keys = {};
+window.addEventListener('keydown', (e) => {
+  keys[e.key] = true;
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') e.preventDefault();
+  if ((e.key === 'r' || e.key === 'R' || e.key === 'Enter') && state === 'over') restart();
+});
+window.addEventListener('keyup', (e) => { keys[e.key] = false; });
+
+let pointerX = null;
+canvas.addEventListener('pointerdown', (e) => { pointerX = e.clientX; if (state === 'over') restart(); });
+canvas.addEventListener('pointermove', (e) => { if (pointerX !== null) pointerX = e.clientX; });
+canvas.addEventListener('pointerup', () => { pointerX = null; });
+
+function spawn() {
+  const roll = Math.random();
+  const kind = roll < 0.12 ? 'bomb' : roll < 0.22 ? 'super' : 'star';
+  const speedBase = 190 + elapsed * 6; // ramps up as the clock runs
+  stars.push({
+    x: 30 + Math.random() * (W - 60),
+    y: -30,
+    vy: speedBase * (0.8 + Math.random() * 0.7),
+    r: kind === 'super' ? 26 : kind === 'bomb' ? 24 : 20,
+    kind,
+    rot: Math.random() * 6.28,
+    vr: (Math.random() - 0.5) * 3
+  });
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.28, sp = 60 + Math.random() * 220;
+    particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 60, life: 0.5 + Math.random() * 0.4, t: 0, color, r: 2 + Math.random() * 3 });
+  }
+}
+
+function restart() {
+  stars = []; particles = [];
+  score = 0; lives = 3; timeLeft = CLOCK_START; elapsed = 0; spawnT = 0;
+  state = 'playing';
+}
+
+function gameOver() {
+  state = 'over';
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('neon-star-best', String(best)); } catch (e) {}
+  }
+}
+
+// Demo bot: chase the nearest star, sidestep bombs headed for the basket.
+function autoplay(dt) {
+  let target = null;
+  for (const s of stars) {
+    if (s.kind === 'bomb') continue;
+    if (!target || s.y > target.y) target = s;
+  }
+  let want = basket.x;
+  if (target) want = target.x;
+  for (const s of stars) {
+    if (s.kind !== 'bomb') continue;
+    if (s.y > H - 420 && Math.abs(s.x - basket.x) < 130) {
+      want = s.x < basket.x ? basket.x + 220 : basket.x - 220;
+    }
+  }
+  const dx = want - basket.x;
+  const step = basket.speed * dt;
+  basket.x += Math.max(-step, Math.min(step, dx));
+  basket.x = Math.min(Math.max(basket.x, basket.w / 2 + 8), W - basket.w / 2 - 8);
+}
+
+function update(dt) {
+  if (state !== 'playing') return;
+  elapsed += dt;
+  timeLeft = Math.max(0, CLOCK_START - elapsed);
+  if (timeLeft <= 0) { gameOver(); return; }
+
+  if (AUTOPLAY) autoplay(dt);
+  else {
+    if (keys['ArrowLeft'] || keys['a'] || keys['A']) basket.x -= basket.speed * dt;
+    if (keys['ArrowRight'] || keys['d'] || keys['D']) basket.x += basket.speed * dt;
+    if (pointerX !== null) basket.x += (pointerX - basket.x) * Math.min(1, dt * 14);
+    basket.x = Math.min(Math.max(basket.x, basket.w / 2 + 8), W - basket.w / 2 - 8);
+  }
+
+  spawnT -= dt;
+  const interval = Math.max(0.28, 0.75 - elapsed * 0.008);
+  if (spawnT <= 0) { spawn(); spawnT = interval; }
+
+  for (let i = stars.length - 1; i >= 0; i--) {
+    const s = stars[i];
+    s.y += s.vy * dt; s.rot += s.vr * dt;
+    const caught = s.y + s.r >= basket.y - 6 && s.y - s.r <= basket.y + basket.h &&
+      Math.abs(s.x - basket.x) <= basket.w / 2 + s.r * 0.6;
+    if (caught) {
+      if (s.kind === 'bomb') {
+        lives -= 1;
+        burst(s.x, s.y, '#ff4757', 26);
+        if (lives <= 0) { stars.splice(i, 1); gameOver(); return; }
+      } else {
+        const pts = s.kind === 'super' ? 25 : 10;
+        score += pts;
+        burst(s.x, s.y, s.kind === 'super' ? '#22d3ee' : '#ffd166', 18);
+      }
+      stars.splice(i, 1);
+    } else if (s.y - s.r > H) {
+      stars.splice(i, 1); // missed star: no penalty, keep it friendly
+    }
+  }
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.t += dt;
+    if (p.t >= p.life) { particles.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 320 * dt;
+  }
+}
+
+function drawStar(x, y, r, rot, color, glow) {
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(rot);
+  ctx.shadowColor = glow; ctx.shadowBlur = 22;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const rr = i % 2 === 0 ? r : r * 0.45;
+    const a = (i * Math.PI) / 5 - Math.PI / 2;
+    ctx[i === 0 ? 'moveTo' : 'lineTo'](Math.cos(a) * rr, Math.sin(a) * rr);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function drawBomb(x, y, r, rot) {
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(rot);
+  ctx.shadowColor = '#ff4757'; ctx.shadowBlur = 22;
+  ctx.fillStyle = '#2b2b3a';
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, 6.29); ctx.fill();
+  ctx.strokeStyle = '#ff4757'; ctx.lineWidth = 4; ctx.stroke();
+  ctx.fillStyle = '#ff4757';
+  ctx.beginPath(); ctx.arc(-r * 0.35, -r * 0.3, r * 0.16, 0, 6.29); ctx.fill();
+  ctx.beginPath(); ctx.arc(r * 0.3, r * 0.25, r * 0.16, 0, 6.29); ctx.fill();
+  ctx.strokeStyle = '#ffd166'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(0, -r); ctx.quadraticCurveTo(r * 0.5, -r * 1.5, r * 0.7, -r * 1.1); ctx.stroke();
+  ctx.fillStyle = '#ffe66d';
+  ctx.beginPath(); ctx.arc(r * 0.7, -r * 1.1, 5, 0, 6.29); ctx.fill();
+  ctx.restore();
+}
+
+function draw() {
+  // Background: deep-space gradient + twinkling stars.
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0b0b2a'); g.addColorStop(0.6, '#141040'); g.addColorStop(1, '#070718');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const t = performance.now() / 1000;
+  for (const b of bgStars) {
+    ctx.globalAlpha = 0.25 + 0.55 * Math.abs(Math.sin(t * b.s + b.p));
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(b.x * W, b.y * H, b.r, 0, 6.29); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const s of stars) {
+    if (s.kind === 'bomb') drawBomb(s.x, s.y, s.r, s.rot);
+    else drawStar(s.x, s.y, s.r, s.rot, s.kind === 'super' ? '#22d3ee' : '#ffd166', s.kind === 'super' ? '#22d3ee' : '#ffb703');
+  }
+  for (const p of particles) {
+    ctx.globalAlpha = 1 - p.t / p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.29); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Basket: neon tray with glow.
+  ctx.save();
+  ctx.shadowColor = '#a855f7'; ctx.shadowBlur = 26;
+  const bx = basket.x - basket.w / 2, by = basket.y;
+  const grad = ctx.createLinearGradient(bx, by, bx + basket.w, by);
+  grad.addColorStop(0, '#7c3aed'); grad.addColorStop(1, '#d946ef');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(bx, by);
+  ctx.lineTo(bx + basket.w, by);
+  ctx.lineTo(bx + basket.w - 14, by + basket.h);
+  ctx.lineTo(bx + 14, by + basket.h);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(bx + 8, by + 4); ctx.lineTo(bx + basket.w - 8, by + 4); ctx.stroke();
+
+  // HUD.
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '700 44px system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('★ ' + score, 28, 66);
+  ctx.textAlign = 'center';
+  const secs = Math.ceil(timeLeft);
+  ctx.fillStyle = secs <= 10 ? '#ff6b81' : '#ffffff';
+  ctx.fillText('⏱ ' + secs + 's', W / 2, 66);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#ff6b81';
+  ctx.fillText('♥'.repeat(Math.max(0, lives)) + '♡'.repeat(Math.max(0, 3 - lives)), W - 28, 66);
+
+  ctx.textAlign = 'center';
+  ctx.font = '700 30px system-ui, sans-serif';
+  ctx.fillStyle = '#ffd166';
+  ctx.fillText('NEON STAR CATCHER', W / 2, 118);
+
+  if (state === 'over') {
+    ctx.fillStyle = 'rgba(5,5,20,.78)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '800 84px system-ui, sans-serif';
+    ctx.fillText('GAME OVER', W / 2, H / 2 - 90);
+    ctx.font = '700 56px system-ui, sans-serif';
+    ctx.fillStyle = '#ffd166';
+    ctx.fillText('Score: ' + score, W / 2, H / 2 + 10);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '500 36px system-ui, sans-serif';
+    ctx.fillText('Best: ' + best, W / 2, H / 2 + 80);
+    ctx.fillStyle = '#22d3ee';
+    ctx.font = '700 40px system-ui, sans-serif';
+    ctx.fillText('Press R or tap to play again', W / 2, H / 2 + 170);
+  }
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+resize();
+basket.x = W / 2;
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
